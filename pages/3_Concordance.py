@@ -47,13 +47,10 @@ ENGLISH_STOP_WORDS = set([
 def detect_file_type(content: str) -> str:
     """ตรวจสอบประเภทไฟล์อัตโนมัติ"""
     sample = content[:500]
-    # มี POS tag รูปแบบ คำ/TAG
     if re.search(r'\w+/[A-Z]{2,5}', sample):
         return "pos_tagged"
-    # มี | คั่น แต่ไม่มี POS
     elif "|" in sample:
         return "segmented"
-    # ข้อความดิบ
     else:
         return "raw"
 
@@ -73,12 +70,11 @@ def process_corpus(uploaded_files, auto_tokenize=True):
         has_pos = False
 
         if file_type == "pos_tagged":
-            # แยกคำและ POS
             has_pos = True
             raw_pairs = [t.strip()
                          for t in re.split(r'[|\n]', content) if t.strip()]
             tokens = []
-            pos_tokens = []  # list of (word, tag)
+            pos_tokens = []
             for pair in raw_pairs:
                 if "/" in pair:
                     parts = pair.rsplit("/", 1)
@@ -126,8 +122,6 @@ def process_corpus(uploaded_files, auto_tokenize=True):
 def check_token_match(token, tag, pattern):
     """Match คำ + รองรับ /TAG pattern"""
     token_lower = token.lower()
-
-    # แยก pattern กับ TAG ถ้ามี
     pos_filter = None
     word_pattern = pattern
 
@@ -136,11 +130,9 @@ def check_token_match(token, tag, pattern):
         word_pattern = parts[0].strip()
         pos_filter = parts[1].strip().upper()
 
-    # ตรวจ TAG ก่อน
     if pos_filter:
         if tag is None or tag.upper() != pos_filter:
             return False
-        # ถ้า word_pattern ว่าง = ค้นหาทุกคำใน POS นั้น
         if word_pattern == "":
             return True
 
@@ -236,7 +228,8 @@ def get_content_words(tokens, extra_stopwords=None):
     stop = ENGLISH_STOP_WORDS.copy()
     if extra_stopwords:
         stop |= set(extra_stopwords)
-    return [t for t in tokens if t not in stop and not re.fullmatch(r'[\d\s\W]+', t) and len(t) >= 2]
+    return [t for t in tokens if t not in stop
+            and not re.fullmatch(r'[\d\s\W]+', t) and len(t) >= 2]
 
 
 def generate_ngrams(tokens, n=2, min_freq=1):
@@ -248,34 +241,70 @@ def generate_ngrams(tokens, n=2, min_freq=1):
     return df[df['Frequency'] >= min_freq].sort_values('Frequency', ascending=False).reset_index(drop=True)
 
 
-def calculate_mi_score(word1, tokens, min_freq=2, files_data=None):
+def calculate_mi_score(word1, tokens, min_freq=2, files_data=None,
+                       search_left=True, search_right=True):
+    """คำนวณ MI Score รองรับ L1 และ/หรือ R1"""
     N = len(tokens)
-    bigrams = [(tokens[i], tokens[i+1]) for i in range(len(tokens)-1)]
-    bigram_counts = Counter(bigrams)
     word_counts = Counter(tokens)
     f_word1 = word_counts.get(word1, 0)
     if f_word1 == 0:
         return pd.DataFrame()
 
-    bigram_files = {}
+    # สร้าง bigram R1 และ L1
+    r1_bigrams = [(tokens[i], tokens[i+1]) for i in range(len(tokens)-1)]
+    l1_bigrams = [(tokens[i+1], tokens[i]) for i in range(len(tokens)-1)]
+
+    r1_counts = Counter(r1_bigrams)
+    l1_counts = Counter(l1_bigrams)
+
+    # สร้าง dict: bigram -> set of filenames
+    r1_files = {}
+    l1_files = {}
     if files_data:
         for fi in files_data:
             fname = fi['filename']
             ft = fi['tokens']
             for i in range(len(ft)-1):
-                bg = (ft[i], ft[i+1])
-                bigram_files.setdefault(bg, set()).add(fname)
+                r1_bg = (ft[i], ft[i+1])
+                l1_bg = (ft[i+1], ft[i])
+                r1_files.setdefault(r1_bg, set()).add(fname)
+                l1_files.setdefault(l1_bg, set()).add(fname)
 
     results = []
-    for (w1, w2), f_pair in bigram_counts.items():
-        if w1 == word1 and f_pair >= min_freq:
-            f_word2 = word_counts.get(w2, 0)
-            if f_word2 > 0:
-                mi = math.log2((f_pair * N) / (f_word1 * f_word2))
-                found_in = ", ".join(sorted(bigram_files.get(
-                    (w1, w2), set()))) if files_data else "-"
-                results.append({"Collocate": w2, "Frequency": f_pair,
-                               "MI Score": round(mi, 3), "พบในไฟล์": found_in})
+
+    # หา R1
+    if search_right:
+        for (w1, w2), f_pair in r1_counts.items():
+            if w1 == word1 and f_pair >= min_freq:
+                f_word2 = word_counts.get(w2, 0)
+                if f_word2 > 0:
+                    mi = math.log2((f_pair * N) / (f_word1 * f_word2))
+                    found_in = ", ".join(
+                        sorted(r1_files.get((w1, w2), set()))) if files_data else "-"
+                    results.append({
+                        "Collocate": w2,
+                        "Position": "R1",
+                        "Frequency": f_pair,
+                        "MI Score": round(mi, 3),
+                        "พบในไฟล์": found_in
+                    })
+
+    # หา L1
+    if search_left:
+        for (w1, w2), f_pair in l1_counts.items():
+            if w1 == word1 and f_pair >= min_freq:
+                f_word2 = word_counts.get(w2, 0)
+                if f_word2 > 0:
+                    mi = math.log2((f_pair * N) / (f_word1 * f_word2))
+                    found_in = ", ".join(
+                        sorted(l1_files.get((w1, w2), set()))) if files_data else "-"
+                    results.append({
+                        "Collocate": w2,
+                        "Position": "L1",
+                        "Frequency": f_pair,
+                        "MI Score": round(mi, 3),
+                        "พบในไฟล์": found_in
+                    })
 
     df = pd.DataFrame(results)
     if not df.empty:
@@ -284,7 +313,8 @@ def calculate_mi_score(word1, tokens, min_freq=2, files_data=None):
     return df
 
 
-def generate_wordcloud(freq_dict, colormap="viridis", bg_color="white", max_words=150, font_path="Sarabun-Regular.ttf"):
+def generate_wordcloud(freq_dict, colormap="viridis", bg_color="white",
+                       max_words=150, font_path="Sarabun-Regular.ttf"):
     if not freq_dict:
         return None
     wc = WordCloud(font_path=font_path, width=900, height=500,
@@ -379,7 +409,6 @@ if uploaded_files:
         files_data, all_tokens_flat = process_corpus(
             uploaded_files, use_auto_tokenize)
 
-    # ตรวจสอบว่ามีไฟล์ที่มี POS ไหม
     any_has_pos = any(f['has_pos'] for f in files_data)
     all_has_pos = all(f['has_pos'] for f in files_data)
 
@@ -397,12 +426,20 @@ if uploaded_files:
     else:
         col_s4.metric("🏷️ POS", "❌ ไม่มีข้อมูล")
 
-    # File type summary
-    type_summary = [f"**{f['filename']}** → `{f['file_type']}`" +
-                    (" 🏷️" if f['has_pos'] else "") for f in files_data]
     with st.expander("📋 สรุปประเภทไฟล์ที่อัปโหลด"):
-        for s in type_summary:
-            st.markdown(s)
+        summary_rows = []
+        for f in files_data:
+            t = f['tokens']
+            summary_rows.append({
+                "ไฟล์": f['filename'],
+                "ประเภท": f['file_type'],
+                "POS": "✅" if f['has_pos'] else "❌",
+                "Tokens": f"{len(t):,}",
+                "Types": f"{len(set(t)):,}",
+                "TTR (%)": round(len(set(t)) / len(t) * 100, 2) if len(t) > 0 else 0,
+            })
+        df_summary = pd.DataFrame(summary_rows)
+        st.dataframe(df_summary, use_container_width=True, hide_index=True)
 
     st.divider()
 
@@ -436,14 +473,16 @@ if uploaded_files:
             | `กิน/VACT` | คำว่า "กิน" ที่เป็นกริยาแสดงการกระทำ |
             | `/NCMN` | ทุกคำที่เป็นคำนามทั่วไป |
             | `จะ*/VAUX` | คำขึ้นต้น "จะ" ที่เป็นกริยาช่วย |
-            | `กิน/VACT /NCMN` | "กิน" (กริยาแสดงการกระทำ) ตามด้วยคำนามทั่วไปใดก็ได้ |
+            | `กิน/VACT /NCMN` | "กิน" ตามด้วยคำนามทั่วไปใดก็ได้ |
             """)
 
         c1, c2, c3 = st.columns([3, 1, 1])
         search_term = c1.text_input("คำค้นหา:", "")
         window = c2.slider("Context Span:", 3, 20, 8)
-        show_pos_kwic = c3.checkbox("แสดง POS", value=False, disabled=not any_has_pos,
-                                    help="ใช้ได้เฉพาะไฟล์ที่มี POS tag", key="kwic_show_pos")
+        show_pos_kwic = c3.checkbox("แสดง POS", value=False,
+                                    disabled=not any_has_pos,
+                                    help="ใช้ได้เฉพาะไฟล์ที่มี POS tag",
+                                    key="kwic_show_pos")
 
         if search_term:
             df = generate_kwic(files_data, search_term,
@@ -451,8 +490,8 @@ if uploaded_files:
             if not df.empty:
                 df.index += 1
                 st.write(f"พบ: **{len(df):,}** รายการ")
-                st.download_button("📥 CSV", convert_df_to_csv(
-                    df), f"kwic_{search_term}.csv", "text/csv")
+                st.download_button("📥 CSV", convert_df_to_csv(df),
+                                   f"kwic_{search_term}.csv", "text/csv")
 
                 def render_kwic_table(df):
                     rows = ""
@@ -484,7 +523,6 @@ if uploaded_files:
                             </td>
                         </tr>
                         """
-
                     html = f"""
                     <div style="overflow-x:auto; overflow-y:auto; max-height:500px;">
                     <table style="width:100%; border-collapse:collapse; font-size:0.9em;
@@ -516,8 +554,8 @@ if uploaded_files:
         col_a, col_b, col_c = st.columns(3)
         show_all = col_a.checkbox(
             "รวม Stop Words", value=True, key="wl_show_all")
-        show_pos_wl = col_b.checkbox(
-            "แสดง POS", value=False, disabled=not any_has_pos, key="wl_show_pos")
+        show_pos_wl = col_b.checkbox("แสดง POS", value=False,
+                                     disabled=not any_has_pos, key="wl_show_pos")
         min_freq_wl = col_c.number_input("ความถี่ขั้นต่ำ:", 1, 1000, 1)
 
         wc_base = Counter(all_tokens_flat) if show_all else content_word_freq
@@ -530,7 +568,6 @@ if uploaded_files:
         df_wl['%'] = (df_wl['Frequency'] / total * 100).round(2)
         df_wl['Cumulative %'] = df_wl['%'].cumsum().round(2)
 
-        # เพิ่มคอลัมน์ POS ถ้ามี
         if show_pos_wl and any_has_pos:
             pos_lookup = {}
             for f in files_data:
@@ -562,8 +599,8 @@ if uploaded_files:
             if not df_ng.empty:
                 df_ng.index += 1
                 st.write(f"พบ: **{len(df_ng):,}** รายการ")
-                st.download_button("📥 CSV", convert_df_to_csv(
-                    df_ng), f"{n_size}grams.csv", "text/csv")
+                st.download_button("📥 CSV", convert_df_to_csv(df_ng),
+                                   f"{n_size}grams.csv", "text/csv")
                 st.dataframe(df_ng, use_container_width=True)
             else:
                 st.warning("ไม่พบข้อมูล")
@@ -574,7 +611,7 @@ if uploaded_files:
         col1, col2, col3, col4 = st.columns(4)
         wc_max = col1.slider("จำนวนคำสูงสุด:", 20, 300, 100)
         wc_cmap = col2.selectbox("Color Scheme:", [
-                                 "viridis", "plasma", "inferno", "magma", "cool", "hot", "RdYlGn", "Spectral"])
+            "viridis", "plasma", "inferno", "magma", "cool", "hot", "RdYlGn", "Spectral"])
         wc_bg = col3.selectbox("Background:", ["white", "black", "#1a1a2e"])
         wc_content = col4.checkbox(
             "เฉพาะ Content Words", value=True, key="wc_content")
@@ -625,36 +662,66 @@ if uploaded_files:
             else:
                 st.warning("ไม่มีข้อมูล")
 
-    # --- Tab 6: Collocations ---
+    # --- Tab 6: Collocations (MI) ---
     with tab6:
         st.subheader("📐 Collocations (Mutual Information Score)")
         st.markdown(
             "**MI > 3** = Collocation ชัดเจน | **MI 0–3** = ปานกลาง | **MI < 0** = ไม่สัมพันธ์")
+
         c1, c2 = st.columns(2)
         node_word = c1.text_input(
             "คำที่ต้องการหา Collocate:", placeholder="เช่น รัก, เรียน")
         mi_min_freq = c2.number_input("ความถี่ขั้นต่ำ:", 1, 100, 2)
 
+        st.markdown("**เลือกตำแหน่งที่ต้องการค้นหา:**")
+        col_l, col_r = st.columns(2)
+        search_left = col_l.checkbox(
+            "⬅️ L1 (ซ้าย 1 ตำแหน่ง)", value=True, key="mi_left")
+        search_right = col_r.checkbox(
+            "➡️ R1 (ขวา 1 ตำแหน่ง)", value=True, key="mi_right")
+
         if st.button("🔍 คำนวณ MI Score") and node_word:
-            df_mi = calculate_mi_score(
-                node_word, all_tokens_flat, mi_min_freq, files_data)
-            if not df_mi.empty:
-                st.write(f"พบ collocates: **{len(df_mi)}** คำ")
-                st.download_button("📥 CSV", convert_df_to_csv(
-                    df_mi), f"collocations_{node_word}.csv", "text/csv")
-
-                def color_mi(val):
-                    if val >= 3:
-                        return 'background-color: #d4edda; color: #155724'
-                    elif val >= 0:
-                        return 'background-color: #fff3cd; color: #856404'
-                    else:
-                        return 'background-color: #f8d7da; color: #721c24'
-
-                st.dataframe(df_mi.style.applymap(color_mi, subset=[
-                             'MI Score']), use_container_width=True)
+            if not search_left and not search_right:
+                st.warning("กรุณาเลือกอย่างน้อย 1 ตำแหน่ง (L1 หรือ R1)")
             else:
-                st.warning(f"ไม่พบ collocation สำหรับ '{node_word}'")
+                df_mi = calculate_mi_score(
+                    node_word, all_tokens_flat, mi_min_freq, files_data,
+                    search_left=search_left, search_right=search_right
+                )
+                if not df_mi.empty:
+                    pos_label = []
+                    if search_left:
+                        pos_label.append("L1")
+                    if search_right:
+                        pos_label.append("R1")
+                    st.write(
+                        f"พบ collocates: **{len(df_mi)}** คำ | ตำแหน่ง: **{' + '.join(pos_label)}**")
+                    st.download_button("📥 CSV", convert_df_to_csv(df_mi),
+                                       f"collocations_{node_word}.csv", "text/csv")
+
+                    def color_mi(val):
+                        if val >= 3:
+                            return 'background-color: #d4edda; color: #155724'
+                        elif val >= 0:
+                            return 'background-color: #fff3cd; color: #856404'
+                        else:
+                            return 'background-color: #f8d7da; color: #721c24'
+
+                    def color_position(val):
+                        if val == "L1":
+                            return 'background-color: #cfe2ff; color: #084298'
+                        elif val == "R1":
+                            return 'background-color: #fde8d8; color: #7d3c00'
+                        return ''
+
+                    st.dataframe(
+                        df_mi.style
+                        .applymap(color_mi, subset=['MI Score'])
+                        .applymap(color_position, subset=['Position']),
+                        use_container_width=True
+                    )
+                else:
+                    st.warning(f"ไม่พบ collocation สำหรับ '{node_word}'")
 
     # --- Tab 7: Corpus Stats ---
     with tab7:
@@ -669,8 +736,8 @@ if uploaded_files:
         st.subheader("สถิติรายไฟล์")
         st.dataframe(stats['file_stats'],
                      use_container_width=True, hide_index=True)
-        st.download_button("📥 Export CSV", convert_df_to_csv(
-            stats['file_stats']), "corpus_stats.csv", "text/csv")
+        st.download_button("📥 Export CSV", convert_df_to_csv(stats['file_stats']),
+                           "corpus_stats.csv", "text/csv")
 
         st.divider()
         st.subheader("🏆 Top 20 Content Words")
@@ -700,7 +767,6 @@ if uploaded_files:
                 except Exception as e:
                     st.error(f"ไม่สามารถโหลด font ได้: {e}")
 
-        # POS Distribution (ถ้ามี POS)
         if any_has_pos:
             st.divider()
             st.subheader("🏷️ POS Distribution")
@@ -716,8 +782,8 @@ if uploaded_files:
                 df_pos['%'] = (df_pos['Count'] / len(all_pos) * 100).round(2)
                 df_pos.index += 1
                 st.dataframe(df_pos, use_container_width=True)
-                st.download_button("📥 Export POS Stats", convert_df_to_csv(
-                    df_pos), "pos_stats.csv", "text/csv")
+                st.download_button("📥 Export POS Stats", convert_df_to_csv(df_pos),
+                                   "pos_stats.csv", "text/csv")
 
     # --- Tab 8: File Content ---
     with tab8:
@@ -727,7 +793,9 @@ if uploaded_files:
             (f for f in files_data if f['filename'] == sel_f), None)
         if selected:
             st.caption(
-                f"ประเภทไฟล์: `{selected['file_type']}` | มี POS: {'✅' if selected['has_pos'] else '❌'} | Tokens: {len(selected['tokens']):,}")
+                f"ประเภทไฟล์: `{selected['file_type']}` | "
+                f"มี POS: {'✅' if selected['has_pos'] else '❌'} | "
+                f"Tokens: {len(selected['tokens']):,}")
             st.text_area("Content:", selected['text'], height=400)
             st.caption("* เครื่องหมาย | แสดงจุดที่ตัดคำ")
 

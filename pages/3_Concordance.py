@@ -716,8 +716,8 @@ if uploaded_files:
 
                     st.dataframe(
                         df_mi.style
-                        .applymap(color_mi, subset=['MI Score'])
-                        .applymap(color_position, subset=['Position']),
+                        .map(color_mi, subset=['MI Score'])
+                        .map(color_position, subset=['Position']),
                         use_container_width=True
                     )
                 else:
